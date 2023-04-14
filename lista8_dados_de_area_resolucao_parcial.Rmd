@@ -1,0 +1,163 @@
+---
+title: "Estatística espacial - Dados de Área"
+subtitle: 'Lista de Exercícios 8'
+author: "Elisa Fink, Geanine Henriques, Giovanna Vidor, Vinícius Zaltron e Vitor Cunha"
+date: "2023"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+
+
+# Essa lista pode ser feita em grupos de ATÉ 7 pessoas. {-}
+
+## O alun@ ou grupo deverá apresentar o código da anáise no dia 14 de abril. 50% da nota é o código (crie uma pasta no github) e 50% da nota é a apresentação (15 minutos) {-}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	error = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r pacotes}
+library(sf)
+library(spdep)
+library(tmap)
+library(ggplot2)
+library(INLA)
+library(geosphere)
+library(spBayes)
+```
+
+## Questão 1 {-}
+Escolha uma base de dados de área e faça as seguintes análises:
+
+
+### a) Comente sobre a escolha da base e qual a variável de interesse. {-}
+
+para a base de dados escolhemos a base "nc" do pacote sf, que contém dados sobre a contagem de nascimentos e mortalidade infantil dos condados da Carolina do Norte, de 01/07/1974 a 30/06/1978 e de 01/07/1979 a 30/06/1984.
+A nossa variável de interesse será a mortalidade infantil em termos relativos no ano de 1974.
+
+```{r dataset}
+# banco de dados
+nc <- st_read(system.file("shape/nc.shp", package="sf"))
+mapa <- tm_shape(nc) +
+  tm_polygons("SID74", palette="Blues", style="quantile") +
+  tm_layout(main.title = "Número de Óbitos Infantis Repentinos em 1974 na Carolina do Norte", legend.position=c("LEFT", "BOTTOM"), legend.title.size = 0.001) +
+  tm_text("SID74", size = 0.8, root = 1)
+mapa
+```
+
+### b) Calcule a proporção da variável de interesse. {-}
+
+Para a proporção da mortalidade infantil, calculamos a divisão entre o número total de óbitos e o número total de nascimentos por condado.
+
+```{r proporcao por condado}
+nc$taxa <- round((nc$SID74/nc$BIR74),3)
+nc$taxa
+```
+
+Ainda, se quisermos uma proporção geral, podemos dividir o total de óbitos pelo total do número de nascimentos sem a especificação por condados.
+
+```{r proporcao geral}
+round((sum(nc$SID74))/(sum(nc$BIR74)),3)
+```
+
+### c) Faça um mapa da taxa, calcule a SMR e faça um gráfico de dispersão considerando essas taxas e o tamanho da população. {-}
+
+Mapa da taxa que calculamos anteriormente:
+
+```{r mapa taxa}
+mapa_prop <- tm_shape(nc) +
+  tm_polygons("taxa", palette="Purples", style="quantile") +
+  tm_layout(main.title = "Taxa de Mortalidade Infantil em 1974 na Carolina do Norte", legend.position=c("LEFT", "BOTTOM"), legend.title.size = 0.001) +
+  tm_text("taxa", size = 0.6, root = 1)
+mapa_prop
+```
+
+Para a SMR, teremos o resultado para cada condado seguindo a ordem das operações segundo o script abaixo:
+
+```{r SMR}
+exp <- sum(nc$SID74)/sum(nc$BIR74)
+nc$exp <- nc$BIR74*exp
+nc$smr <- nc$SID74/nc$exp
+head(nc$smr)
+```
+
+Gráfico de dispersão:
+
+```{r histograma}
+ggplot(nc, aes(x=smr, y=taxa)) +
+geom_point() +
+labs(x="smr", y="Taxa de mortalidade infantil")
+```
+
+Como há uma relação aproximadamente linear entre os SMRs para cada condado e a sua respectiva taxa de mortalidade infantil, podemos constatar que para esse cenário a estimativa de SMR é não-viesada.
+
+### d) Calcule o índice de moran para esses dados. {-}
+
+```{r moran}
+map <- as_Spatial(st_zm(nc))
+nb <- poly2nb(map)
+w <- nb2listw(nb, style="W")
+
+lw <- nb2listw(nb, style="W", zero.policy=TRUE)
+#exemplo pesos
+lw$weights[1]
+
+#analitica
+I <- moran(map$SID74, lw, length(nb), Szero(lw), NAOK = TRUE)[1]
+I
+
+#monte carlo
+MC<- moran.mc(map$SID74, lw, nsim=300, alternative="greater",zero.policy=TRUE, adjust.n=FALSE )
+MC
+```
+
+O coeficiente de Moran mede a autocorrelação espacial global. No nosso caso, comparando com dados gerados pelo procedimento de Monte-Carlo, o teste foi significativo, já que p < 0.05. Ainda assim, é uma autocorrelação global positiva fraca, uma vez que o índice foi estimado em aproximadamente 0.148.
+
+
+### e) Calcule o risco relativo um modelo sem efeito aleatório espacial. {-}  
+
+```{r modelo sem EAE}
+modelo <- glm(SID74 ~ BIR74, 
+              data=nc, family=poisson)
+
+print("Coeficientes do modelo (OR):")
+exp(cbind(OR = coef(modelo), confint(modelo)))
+
+pmap <- probmap(nc$SID74, nc$BIR74)
+pmap$relRisk <- round(pmap$relRisk, 0)
+pmap$relRisk <- pmap$relRisk/100
+nc$pmap <- pmap$pmap
+nc$relRisk <- pmap$relRisk
+brks <- seq(0,5,0.5)
+tm_shape(nc) + 
+  tm_fill("relRisk", breaks=brks, midpoint=0.5, palette="Reds", strech.palette = F) + 
+  tm_layout(legend.outside=TRUE, legend.title.size = 0.01, main.title = "Risco Relativo de Óbitos para Nascimentos em 1974 na Carolina do Norte") + 
+  tm_text("relRisk", size = 0.7, root = 1) +
+  tm_borders(col = "black", lwd = 0.1)
+```
+
+### f) Calcule o risco relativo utilizando o modelo BYM2, utilize alguma covariável. {-}  
+
+Apesar de não ser um procedimento trivial, fica como desafio ao leitor.
+
+### g) Interprete os parâmetros estimados do modelo da letra _e_. {-}
+
+O coeficiente de Odds Ratio apresentado em si não faz muito sentido, uma vez que estamos modelando o número de óbitos em função do número de nascimentos, mas colocando em perspectiva o mapa com as Odds Ratios para cada condado, significa a chance de que haja o óbito dado que houve nascimento naquele condado versus a chance de que haja um óbito dado que o nascimento não ocorreu naquele condado. Essa linha de raciocínio, embora pouco usual, tem sentido prático. Os condados com OR > 1 são tipicamente os condados com taxa de mortalidade infantil maior do que a taxa de mortalidade infantil geral, e os condados com OR < 1 são tipicamente os condados com taxa de mortalidade infantil menor do que a taxa de mortalidade infantil geral.
+
+### h) Qual a diferença entre as taxas do modelo bayesiano e a SMR? {-}
+
+
+
+
